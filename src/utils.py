@@ -3,18 +3,33 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from collections import Counter
 
 
-def normalize(text: str) -> set:
+def normalize(text: str) -> Counter:
     # Lowercase, strip punctuation from each token, split on whitespace
     # No stopword removal (conserve meaning)
+    # Returns Counter to preserve token multiplicities for F1
     tokens = text.lower().split()
     cleaned_tokens = []
     for token in tokens:
         cleaned = token.strip(string.punctuation)
         if cleaned:
             cleaned_tokens.append(cleaned)
-    return set(cleaned_tokens)
+    return Counter(cleaned_tokens)
+
+
+def normalize_str(text: str) -> str:
+    # Lowercase, strip punctuation, remove articles (a, an, the)
+    # Returns normalized string for Exact Match evaluation
+    tokens = text.lower().split()
+    cleaned_tokens = []
+    articles = {'a', 'an', 'the'}
+    for token in tokens:
+        cleaned = token.strip(string.punctuation)
+        if cleaned and cleaned not in articles:
+            cleaned_tokens.append(cleaned)
+    return ' '.join(cleaned_tokens)
 
 
 def make_cache_key(prompt: str, passage: str = "") -> str:
@@ -48,19 +63,13 @@ def groq_api_call_with_retry(client, prompt, max_retries=5):
     for attempt, delay in enumerate(delays[:max_retries]):
         try:
             response = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 max_tokens=64,
-                logprobs=True,
             )
             return {
                 "answer": response.choices[0].message.content,
-                "total_logprob": sum(
-                    token.logprob
-                    for token in response.choices[0].logprobs.content
-                    if hasattr(token, "logprob")
-                ),
             }
         except Exception as e:
             if attempt == max_retries - 1:
