@@ -14,7 +14,8 @@ def build_faiss_index():
     embeddings = np.load(embeddings_path)
 
     # Verify shape and dtype
-    assert embeddings.shape == (30000, 768), f"Wrong shape: {embeddings.shape}"
+    assert embeddings.ndim == 2, f"Expected 2D array, got {embeddings.ndim}"
+    assert embeddings.shape[1] == 768, f"Wrong embedding dimension: {embeddings.shape[1]}"
     assert embeddings.dtype == np.float32, f"Wrong dtype: {embeddings.dtype}"
 
     # Verify L2 normalization

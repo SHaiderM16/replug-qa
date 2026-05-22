@@ -2,8 +2,10 @@ import string
 import hashlib
 import json
 import time
+import os
 from pathlib import Path
 from collections import Counter
+import cohere
 
 
 def normalize(text: str) -> Counter:
@@ -56,20 +58,70 @@ def save_cache_entry(cache_file, entry):
         f.write(json.dumps(entry) + "\n")
 
 
-def groq_api_call_with_retry(client, prompt, max_retries=5):
-    # Manual retry loop for Groq API calls
+def cohere_api_call_with_retry(client, prompt, max_retries=5):
+    # Manual retry loop for Cohere API calls
     delays = [1, 2, 4, 8, 16]
+    co = cohere.ClientV2(api_key=os.getenv("COHERE_API_KEY"))
+
+    # Rate limit throttle: Cohere free tier = 20 req/min → one call every 3 seconds
+    time.sleep(3)
 
     for attempt, delay in enumerate(delays[:max_retries]):
         try:
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+            response = co.chat(
+                model="command-r-plus-08-2024",
                 messages=[{"role": "user", "content": prompt}],
+                logprobs=True,
                 temperature=0,
-                max_tokens=64,
+                max_tokens=15,
             )
+
+            # Extract answer and total logprob
+            # Response structure varies: sometimes 1 item (thinking), sometimes 2 items (thinking + text)
+            answer = None
+
+            # First try to find a direct text content item
+            for content_item in response.message.content:
+                if hasattr(content_item, 'text') and hasattr(content_item, 'type') and content_item.type == 'text':
+                    answer = content_item.text
+                    break
+
+            # If no direct text item, extract from thinking content
+            if answer is None:
+                for content_item in response.message.content:
+                    if hasattr(content_item, 'thinking'):
+                        thinking_text = str(content_item.thinking)
+                        # Try to extract answer from thinking content
+                        # Look for patterns like "answer is X" or direct statements
+                        import re
+                        # Try to find the last sentence, which is usually the answer
+                        sentences = thinking_text.split('.')
+                        if sentences:
+                            # Get the last complete sentence
+                            potential_answer = sentences[-1].strip()
+                            if potential_answer and len(potential_answer) > 3:
+                                answer = potential_answer + "."
+                        # Fallback: use the full thinking content
+                        if not answer:
+                            answer = thinking_text[:200]  # Truncate if too long
+                        break
+
+            # Ultimate fallback
+            if not answer:
+                answer = str(response.message.content[0])
+
+            # Remove trailing punctuation for cleaner EM matching
+            answer = answer.rstrip('.,!?;:')
+
+            # Compute total logprob if logprobs exist
+            if hasattr(response, 'logprobs') and response.logprobs:
+                total_logprob = sum(token.logprobs[0] for token in response.logprobs)
+            else:
+                total_logprob = float("-inf")
+
             return {
-                "answer": response.choices[0].message.content,
+                "answer": answer,
+                "total_logprob": total_logprob
             }
         except Exception as e:
             if attempt == max_retries - 1:

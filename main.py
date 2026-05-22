@@ -3,8 +3,6 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-from groq import Groq
-
 import src.data_prep as dp
 import src.dense_index as di
 import src.baselines as bl
@@ -132,13 +130,11 @@ def main():
     # Main pipeline orchestration with checkpoint/resume logic
     load_dotenv()
     
-    # Check for Groq API key
-    if not os.getenv('GROQ_API_KEY'):
-        print("Error: GROQ_API_KEY not found in environment")
-        print("Please set up your .env file with GROQ_API_KEY")
+    # Check for Cohere API key
+    if not os.getenv('COHERE_API_KEY'):
+        print("Error: COHERE_API_KEY not found in environment")
+        print("Please set up your .env file with COHERE_API_KEY")
         sys.exit(1)
-    
-    client = Groq(api_key=os.getenv('GROQ_API_KEY'))
     
     print("=" * 50)
     print("REPLUG QA Pipeline")
@@ -148,8 +144,8 @@ def main():
     phases = [
         ("Data Preparation", lambda: run_phase_1_data_prep()),
         ("FAISS Index", lambda: run_phase_2_dense_index()),
-        ("Baselines", lambda: run_phase_3_baselines(client)),
-        ("REPLUG Ensemble", lambda: run_phase_4_ensemble(client)),
+        ("Baselines", lambda: run_phase_3_baselines(None)),
+        ("REPLUG Ensemble", lambda: run_phase_4_ensemble(None)),
         ("Evaluation", lambda: run_phase_5_evaluation())
     ]
     

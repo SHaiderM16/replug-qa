@@ -199,7 +199,8 @@ def save_passages_and_embeddings(passages, embeddings):
     print(f"Saved embeddings shape {embeddings.shape} to {embeddings_path}")
 
     # Verify shape and dtype
-    assert embeddings.shape == (30000, 768), f"Wrong shape: {embeddings.shape}"
+    assert len(passages) == embeddings.shape[0], f"Passage count mismatch: {len(passages)} vs {embeddings.shape[0]}"
+    assert embeddings.shape[1] == 768, f"Wrong embedding dimension: {embeddings.shape[1]}"
     assert embeddings.dtype == np.float32, f"Wrong dtype: {embeddings.dtype}"
 
     # Verify L2 normalization

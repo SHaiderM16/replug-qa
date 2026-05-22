@@ -4,7 +4,7 @@ from pathlib import Path
 from rank_bm25 import BM25Okapi
 import numpy as np
 
-from src.utils import normalize, make_cache_key, load_cache, save_cache_entry, groq_api_call_with_retry
+from src.utils import normalize, make_cache_key, load_cache, save_cache_entry, cohere_api_call_with_retry
 
 
 def build_prompt(question, passage=None, examples=[]):
@@ -19,8 +19,8 @@ def build_prompt(question, passage=None, examples=[]):
         lines.append(f"Answer: {ex['answer']}")
     
     lines.append(f"Question: {question}")
-    lines.append("Answer:")
-    
+    lines.append("Answer (1-5 words only, no explanation, no extra text):")
+
     return "\n".join(lines)
 
 
@@ -36,7 +36,7 @@ def run_no_retrieval_baseline(queries, examples, client, cache_file):
         if cache_key in cache:
             answer = cache[cache_key]['answer']
         else:
-            response = groq_api_call_with_retry(client, prompt)
+            response = cohere_api_call_with_retry(client, prompt)
             if response is None:
                 answer = ""
             else:
@@ -75,7 +75,7 @@ def run_bm25_baseline(queries, passages, examples, client, cache_file):
         if cache_key in cache:
             answer = cache[cache_key]['answer']
         else:
-            response = groq_api_call_with_retry(client, prompt)
+            response = cohere_api_call_with_retry(client, prompt)
             if response is None:
                 answer = ""
             else:
@@ -111,7 +111,7 @@ def run_random_baseline(queries, passages, examples, client, cache_file):
         if cache_key in cache:
             answer = cache[cache_key]['answer']
         else:
-            response = groq_api_call_with_retry(client, prompt)
+            response = cohere_api_call_with_retry(client, prompt)
             if response is None:
                 answer = ""
             else:
@@ -167,16 +167,18 @@ def run_all_baselines(queries_file, passages_file, examples_file, client):
 
 
 if __name__ == "__main__":
-    from groq import Groq
     import os
     from dotenv import load_dotenv
-    
+
     load_dotenv()
-    client = Groq(api_key=os.getenv('GROQ_API_KEY'))
-    
+
+    if not os.getenv('COHERE_API_KEY'):
+        print("Error: COHERE_API_KEY not found in environment")
+        exit(1)
+
     results = run_all_baselines(
         'data/queries.json',
         'data/passages.json',
         'data/examples.json',
-        client
+        None
     )

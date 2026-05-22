@@ -12,9 +12,19 @@ from src.utils import (
     make_cache_key,
     load_cache,
     save_cache_entry,
-    groq_api_call_with_retry,
+    cohere_api_call_with_retry,
 )
 from src.dense_index import load_faiss_index
+
+
+# Refusal detection safeguard
+REFUSAL_PHRASES = [
+    "i'm sorry", "i don't have", "not enough information",
+    "cannot answer", "no information", "knowledge not found"
+]
+
+def is_refusal(answer: str) -> bool:
+    return any(phrase in answer.lower() for phrase in REFUSAL_PHRASES)
 
 
 def compute_lambda_weights(cosine_scores):
@@ -47,7 +57,7 @@ def generate_answers_for_passages(
     cache = load_cache(cache_file)
 
     for passage in passages:
-        prompt = f"Knowledge: {passage}\nQuestion: {query}\nAnswer:"
+        prompt = f"Knowledge: {passage}\nQuestion: {query}\nAnswer (1-5 words only, no explanation, no extra text):"
 
         # Add few-shot examples
         for ex in few_shot_examples:
@@ -63,7 +73,7 @@ def generate_answers_for_passages(
 
             passage_responses.append({"passage": passage, "answer": answer})
         else:
-            api_response = groq_api_call_with_retry(client, prompt)
+            api_response = cohere_api_call_with_retry(client, prompt)
             if api_response is None:
                 passage_responses.append({"passage": passage, "answer": ""})
             else:
@@ -79,24 +89,35 @@ def generate_answers_for_passages(
 
 
 def compute_weighted_scores(passage_responses, log_lambda, k_values):
-    """Majority voting over top-k answers (approximation due to Groq logprobs limitation)."""
+    """Majority voting over top-k answers with refusal filtering."""
     results = {}
     for k in k_values:
         # Get indices of top-k passages by lambda (descending)
         top_k_idx = np.argsort(log_lambda)[-k:]   # ascending -> last k are highest lambda
-        top_k_answers = [passage_responses[i]['answer'] for i in top_k_idx]
 
-        # Normalize answers (skip empty/whitespace)
-        norm_answers = [normalize_str(a) for a in top_k_answers if a and a.strip()]
+        # Filter out refusal answers
+        valid_responses = []
+        for idx in top_k_idx:
+            answer = passage_responses[idx]['answer']
+            if not is_refusal(answer):
+                valid_responses.append(answer)
+
+        # If all answers are refusals, return first answer (fallback)
+        if not valid_responses:
+            results[k] = passage_responses[top_k_idx[0]]['answer']
+            continue
+
+        # Normalize valid answers
+        norm_answers = [normalize_str(a) for a in valid_responses if a and a.strip()]
         if not norm_answers:
-            results[k] = ""
+            results[k] = valid_responses[0]
             continue
 
         # Majority vote
         winner_norm = Counter(norm_answers).most_common(1)[0][0]
 
         # Return the original answer (first matching winner)
-        for a in top_k_answers:
+        for a in valid_responses:
             if normalize_str(a) == winner_norm:
                 results[k] = a
                 break
@@ -155,17 +176,19 @@ def run_replug_ensemble(queries_file, passages_file, index_file, examples_file, 
 
 
 if __name__ == "__main__":
-    from groq import Groq
     import os
     from dotenv import load_dotenv
 
     load_dotenv()
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+    if not os.getenv("COHERE_API_KEY"):
+        print("Error: COHERE_API_KEY not found in environment")
+        exit(1)
 
     results = run_replug_ensemble(
         "data/queries.json",
         "data/passages.json",
         "data/faiss.index",
         "data/examples.json",
-        client,
+        None,
     )
