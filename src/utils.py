@@ -22,8 +22,7 @@ def normalize(text: str) -> Counter:
 
 
 def normalize_str(text: str) -> str:
-    # Lowercase, strip punctuation, remove articles (a, an, the)
-    # Returns normalized string for Exact Match evaluation
+    # Standard NQ normalization: lowercase, strip punctuation, remove articles
     tokens = text.lower().split()
     cleaned_tokens = []
     articles = {'a', 'an', 'the'}
@@ -40,6 +39,10 @@ def make_cache_key(prompt: str, passage: str = "") -> str:
     return hashlib.md5(content.encode()).hexdigest()
 
 
+# Cache format version - increment when structure changes
+CACHE_VERSION = 2
+
+
 def load_cache(cache_file):
     # Load JSONL cache file into dict
     cache = {}
@@ -47,13 +50,17 @@ def load_cache(cache_file):
         with open(cache_file, "r") as f:
             for line in f:
                 entry = json.loads(line.strip())
+                # Skip entries from old cache versions (missing total_logprob)
+                if entry.get("cache_version") != CACHE_VERSION:
+                    continue
                 key = entry["cache_key"]
                 cache[key] = entry
     return cache
 
 
 def save_cache_entry(cache_file, entry):
-    # Append entry to cache file
+    # Append entry to cache file with version tag
+    entry["cache_version"] = CACHE_VERSION
     with open(cache_file, "a") as f:
         f.write(json.dumps(entry) + "\n")
 

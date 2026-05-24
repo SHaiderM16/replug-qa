@@ -131,39 +131,67 @@ def run_random_baseline(queries, passages, examples, client, cache_file):
 
 
 def run_all_baselines(queries_file, passages_file, examples_file, client):
-    # Run all baseline experiments
+    # Run all baseline experiments with incremental checkpointing
     with open(queries_file) as f:
         queries = json.load(f)
-    
+
     with open(passages_file) as f:
         passages = json.load(f)
-    
+
     with open(examples_file) as f:
         examples = json.load(f)
-    
+
     cache_file = Path("data/baseline_cache.jsonl")
     results_file = Path("data/baseline_results.json")
-    
-    print("Running no retrieval baseline...")
-    no_retrieval_results = run_no_retrieval_baseline(queries, examples, client, cache_file)
-    
-    print("Running BM25 baseline...")
-    bm25_results = run_bm25_baseline(queries, passages, examples, client, cache_file)
-    
-    print("Running random baseline...")
-    random_results = run_random_baseline(queries, passages, examples, client, cache_file)
-    
-    results = {
-        'no_retrieval': no_retrieval_results,
-        'bm25': bm25_results,
-        'random': random_results
-    }
-    
+
+    # Load existing results if any (for resume capability)
+    all_results = {}
+    if results_file.exists():
+        with open(results_file) as f:
+            all_results = json.load(f)
+        print(f"Resuming baselines from existing results")
+
+    checkpoint_interval = 5  # Save every 5 queries
+
+    # No retrieval baseline
+    if 'no_retrieval' not in all_results or len(all_results.get('no_retrieval', [])) < len(queries):
+        print("Running no retrieval baseline...")
+        no_retrieval_results = run_no_retrieval_baseline(queries, examples, client, cache_file)
+        all_results['no_retrieval'] = no_retrieval_results
+        with open(results_file, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        print(f"No retrieval complete ({len(no_retrieval_results)} queries)")
+    else:
+        print("No retrieval baseline: skipped (already done)")
+
+    # BM25 baseline
+    if 'bm25' not in all_results or len(all_results.get('bm25', [])) < len(queries):
+        print("Running BM25 baseline...")
+        bm25_results = run_bm25_baseline(queries, passages, examples, client, cache_file)
+        all_results['bm25'] = bm25_results
+        with open(results_file, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        print(f"BM25 complete ({len(bm25_results)} queries)")
+    else:
+        print("BM25 baseline: skipped (already done)")
+
+    # Random baseline
+    if 'random' not in all_results or len(all_results.get('random', [])) < len(queries):
+        print("Running random baseline...")
+        random_results = run_random_baseline(queries, passages, examples, client, cache_file)
+        all_results['random'] = random_results
+        with open(results_file, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        print(f"Random complete ({len(random_results)} queries)")
+    else:
+        print("Random baseline: skipped (already done)")
+
+    # Final save
     with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    print(f"Saved results to {results_file}")
-    return results
+        json.dump(all_results, f, indent=2)
+
+    print(f"Saved baseline results to {results_file}")
+    return all_results
 
 
 if __name__ == "__main__":

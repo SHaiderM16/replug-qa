@@ -1,13 +1,11 @@
 import json
 import numpy as np
-from scipy.special import logsumexp
+from scipy.special import logsumexp as scipy_logsumexp
 from pathlib import Path
 import torch
 from transformers import AutoTokenizer, AutoModel
-from collections import Counter
 
 from src.utils import (
-    normalize,
     normalize_str,
     make_cache_key,
     load_cache,
@@ -29,7 +27,7 @@ def is_refusal(answer: str) -> bool:
 
 def compute_lambda_weights(cosine_scores):
     # Compute numerically stable log-softmax weights
-    return cosine_scores - logsumexp(cosine_scores)
+    return cosine_scores - scipy_logsumexp(cosine_scores)
 
 
 def get_query_embedding(query_text: str) -> np.ndarray:
@@ -57,21 +55,32 @@ def generate_answers_for_passages(
     cache = load_cache(cache_file)
 
     for passage in passages:
-        prompt = f"Knowledge: {passage}\nQuestion: {query}\nAnswer (1-5 words only, no explanation, no extra text):"
+        passage_text = passage['text'] if isinstance(passage, dict) else passage
 
-        # Add few-shot examples
+        # Build prompt: few-shot examples without Knowledge prefix, then actual query with passage
+        lines = []
         for ex in few_shot_examples:
-            prompt = f"Knowledge: {ex.get('passage', '')}\nQuestion: {ex['question']}\nAnswer: {ex['answer']}\n\n{prompt}"
+            lines.append(f"Question: {ex['question']}")
+            lines.append(f"Answer: {ex['answer']}")
+        lines.append(f"Knowledge: {passage_text}")
+        lines.append(f"Question: {query}")
+        lines.append("Answer (1-5 words only, no explanation, no extra text):")
+        prompt = "\n".join(lines)
 
         cache_key = make_cache_key(prompt)
 
         if cache_key in cache:
             response = cache[cache_key]
             answer = response["answer"]
+            total_logprob = response.get("total_logprob", float("-inf"))
             if answer is None or not answer.strip():
                 answer = ""
 
-            passage_responses.append({"passage": passage, "answer": answer})
+            passage_responses.append({
+                "passage": passage,
+                "answer": answer,
+                "total_logprob": total_logprob
+            })
         else:
             api_response = cohere_api_call_with_retry(client, prompt)
             if api_response is None:
@@ -82,50 +91,73 @@ def generate_answers_for_passages(
                 if answer is None or not answer.strip():
                     answer = ""
 
-                passage_responses.append({"passage": passage, "answer": answer})
-                save_cache_entry(cache_file, {"cache_key": cache_key, "answer": answer})
+                passage_responses.append({
+                    "passage": passage,
+                    "answer": answer,
+                    "total_logprob": api_response["total_logprob"]
+                })
+                save_cache_entry(cache_file, {
+                    "cache_key": cache_key,
+                    "answer": answer,
+                    "total_logprob": api_response["total_logprob"]
+                })
 
     return passage_responses
 
 
 def compute_weighted_scores(passage_responses, log_lambda, k_values):
-    """Majority voting over top-k answers with refusal filtering."""
+    # λ-weighted logprob scoring per REPLUG Section 3.2
+    # Each answer's score = logsumexp(λ_i + logprob_i) over passages giving that answer
     results = {}
     for k in k_values:
         # Get indices of top-k passages by lambda (descending)
-        top_k_idx = np.argsort(log_lambda)[-k:]   # ascending -> last k are highest lambda
+        top_k_idx = np.argsort(log_lambda)[-k:]
 
-        # Filter out refusal answers
-        valid_responses = []
+        # Collect weighted scores for each unique normalized answer
+        answer_groups = {}
+
         for idx in top_k_idx:
-            answer = passage_responses[idx]['answer']
-            if not is_refusal(answer):
-                valid_responses.append(answer)
+            resp = passage_responses[idx]
+            answer = resp['answer']
+            logprob = resp.get('total_logprob', float('-inf'))
 
-        # If all answers are refusals, return first answer (fallback)
-        if not valid_responses:
-            results[k] = passage_responses[top_k_idx[0]]['answer']
+            # Skip refusal answers and empty answers
+            if is_refusal(answer) or not answer or not answer.strip():
+                continue
+
+            # Normalize answer for deduplication
+            norm_answer = normalize_str(answer)
+
+            # Compute λ-weighted logprob (λ is already in log space)
+            weighted_score = log_lambda[idx] + logprob
+
+            if norm_answer not in answer_groups:
+                answer_groups[norm_answer] = []
+            answer_groups[norm_answer].append((weighted_score, answer))
+
+        # Edge case: all answers filtered out
+        if not answer_groups:
+            results[k] = "I don't know"
             continue
 
-        # Normalize valid answers
-        norm_answers = [normalize_str(a) for a in valid_responses if a and a.strip()]
-        if not norm_answers:
-            results[k] = valid_responses[0]
-            continue
+        # Aggregate each group using logsumexp (proper probability sum in log space)
+        final_scores = {}
+        original_answers = {}
+        for norm_answer, scores in answer_groups.items():
+            weighted_scores_only = [s[0] for s in scores]
+            final_scores[norm_answer] = scipy_logsumexp(weighted_scores_only)
+            # Store the original answer (first occurrence for this normalized form)
+            original_answers[norm_answer] = scores[0][1]
 
-        # Majority vote
-        winner_norm = Counter(norm_answers).most_common(1)[0][0]
+        # Select answer with highest aggregated score
+        winner_norm = max(final_scores.items(), key=lambda x: x[1])[0]
+        results[k] = original_answers[winner_norm]
 
-        # Return the original answer (first matching winner)
-        for a in valid_responses:
-            if normalize_str(a) == winner_norm:
-                results[k] = a
-                break
     return results
 
 
 def run_replug_ensemble(queries_file, passages_file, index_file, examples_file, client):
-    # Run REPLUG ensemble for all queries
+    # Run REPLUG ensemble for all queries with incremental checkpointing
     with open(queries_file) as f:
         queries = json.load(f)
 
@@ -139,17 +171,31 @@ def run_replug_ensemble(queries_file, passages_file, index_file, examples_file, 
     cache_file = Path("data/ensemble_cache.jsonl")
     results_file = Path("data/ensemble_results.json")
 
+    # Load existing results if any (for resume capability)
     all_results = {}
-    k_values = [1, 2, 5, 10]
+    if results_file.exists():
+        with open(results_file) as f:
+            all_results = json.load(f)
+        print(f"Resuming from {len(all_results)} existing results")
 
-    for query in queries:
+    k_values = [1, 2, 5, 10, 15]
+    checkpoint_interval = 5  # Save every 5 queries
+
+    for idx, query in enumerate(queries):
+        qid = query["id"]
+
+        # Skip if already processed
+        if qid in all_results:
+            print(f"Skipping {qid} (already done)")
+            continue
+
         query_text = query["question"]
 
         # Generate query embedding using Contriever
         query_embedding = get_query_embedding(query_text)
 
-        # Retrieve top-10 passages
-        scores, indices = index.search(query_embedding.reshape(1, -1), k=10)
+        # Retrieve top-15 passages
+        scores, indices = index.search(query_embedding.reshape(1, -1), k=15)
         top_passages = [passages[i] for i in indices[0]]
 
         # Compute lambda weights
@@ -165,9 +211,16 @@ def run_replug_ensemble(queries_file, passages_file, index_file, examples_file, 
             passage_responses, log_lambda, k_values
         )
 
-        all_results[query["id"]] = weighted_results
+        all_results[qid] = weighted_results
+        print(f"Processed {idx+1}/{len(queries)}: {qid}")
 
-    # Save results
+        # Incremental checkpoint save
+        if (idx + 1) % checkpoint_interval == 0 or (idx + 1) == len(queries):
+            with open(results_file, "w") as f:
+                json.dump(all_results, f, indent=2)
+            print(f"Checkpoint saved ({len(all_results)} queries)")
+
+    # Final save
     with open(results_file, "w") as f:
         json.dump(all_results, f, indent=2)
 

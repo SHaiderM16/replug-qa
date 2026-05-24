@@ -50,27 +50,27 @@ def compute_token_f1(predicted: str, gold_answers: list) -> float:
 
 
 def evaluate_condition(predictions: dict, gold_data: dict) -> dict:
-    # Evaluate EM and F1 for one condition
+    # Evaluate EM and F1 for one condition using standard NQ normalization
     em_scores = []
     f1_scores = []
-    
+
     for pred in predictions:
         question_id = pred['question_id']
         if question_id not in gold_data:
             continue
-        
+
         predicted_answer = pred['predicted_answer']
         gold_answers = gold_data[question_id]['answers']
-        
+
         em = compute_exact_match(predicted_answer, gold_answers)
         f1 = compute_token_f1(predicted_answer, gold_answers)
-        
+
         em_scores.append(em)
         f1_scores.append(f1)
-    
+
     avg_em = np.mean(em_scores) if em_scores else 0.0
     avg_f1 = np.mean(f1_scores) if f1_scores else 0.0
-    
+
     return {'em': avg_em, 'f1': avg_f1}
 
 
@@ -152,23 +152,23 @@ def load_gold_answers(nq_data_path: str) -> dict:
 def main_evaluation(baseline_results_file: str, ensemble_results_file: str, nq_data_file: str):
     # Orchestrate full evaluation pipeline
     gold_data = load_gold_answers(nq_data_file)
-    
+
     # Load baseline results
     with open(baseline_results_file) as f:
         baseline_results = json.load(f)
-    
+
     # Load ensemble results
     with open(ensemble_results_file) as f:
         ensemble_results = json.load(f)
-    
+
     # Evaluate baselines
     all_results = {}
-    
+
     for condition, predictions in baseline_results.items():
         all_results[condition] = evaluate_condition(predictions, gold_data)
-    
+
     # Evaluate ensemble at different k values
-    k_values = [1, 2, 5, 10]
+    k_values = [1, 2, 5, 10, 15]
     ensemble_evaluated = evaluate_all_k_values(ensemble_results, gold_data, k_values)
     all_results.update(ensemble_evaluated)
     
